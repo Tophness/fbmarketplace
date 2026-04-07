@@ -29,3 +29,4 @@ w3lib==1.22.0
 websockets==10.2
 Werkzeug==2.0.3
 zipp==3.7.0
+PyQt5

@@ -1,176 +1,144 @@
-# Marketplace API
+# Facebook Marketplace API & Desktop Browser
 
-An easy-to-use Facebook Marketplace API, that functions without the need to log into a Facebook account. Wraps the Facebook GraphQL API, allowing for quick and easy retrieval of Facebook Marketplace listings and other relevant Marketplace data.
-<br><br>
-## Responses
+A powerful, dual-purpose project featuring an easy-to-use Facebook Marketplace API and a feature-rich standalone Desktop Application. Both function by wrapping the internal Facebook GraphQL API, allowing for quick retrieval of Marketplace listings, detailed item data, and images **without requiring a Facebook account**.
+
+## Features
+
+* **Standalone Desktop App (`app.py`)**: A PyQt5-based browser with advanced multi-tier sorting, keyword filtering, background image/description caching, proxy support, and a built-in wishlist/favorites system.
+* **Scraper Core (`MarketplaceScraper.py`)**: Directly queries Facebook's GraphQL endpoints. Supports pagination (cursors), rate-limit handling, local JSON caching, and fetches deep metadata (delivery types, categories, extra photos).
+* **Flask API (`MarketplaceAPI.py`)**: A lightweight local web server that exposes the scraper functionality via simple REST endpoints.
+
+---
+
+## Installation
+
+1. Clone or download the repository.
+2. Install the required Python dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+---
+
+## The Desktop Application
+
+The desktop app provides a seamless browsing experience outside of the browser. 
+
+**To run the app:**
+```bash
+python app.py
+```
+
+**Key Features:**
+* **Background Fetching**: Automatically fetches item descriptions, attributes, and high-res images in the background as you scroll.
+* **Favorites & Wishlists**: Save items, group them by category, or assign them to custom Wishlists.
+* **Advanced Filters**: Filter results by exact matches, exclusions, or partial matches across titles, descriptions, and item attributes.
+* **Multi-Tier Sorting**: Sort by Price, Time Listed, Condition, or by how many custom conditions an item matches.
+* **Proxy Support**: Configure proxies right from the settings menu to prevent rate-limiting.
+
+---
+
+## The Flask API
+
+If you prefer to integrate this into your own project, you can run the local Flask server.
+
+**To run the API:**
+```bash
+python MarketplaceAPI.py
+```
+
+### API Responses
+
 **All** endpoints will return a JSON response in the following format:
-```js
+```json
 {
-    "status": String,
+    "status": "Success",
     "error": {
-        "source": String,
-        "message": String
+        "source": "Facebook",
+        "message": "Rate limited"
     },
-    "data": Array
+    "data": {}
 }
 ```
-```status```: Indicates whether a request was a success or failure. Successful requests will have a status of "Success" and failed requests will have a status of "Failure".
-<br>
+* `status`: "Success" or "Failure".
+* `error`: Will be empty if no error exists. Contains `source` ("Facebook", "User", or "Parsing") and `message`.
+* `data`: Contains the requested information.
 
-```error```: A request error (will be empty if no error exists).
-- ```error.source```: Indicates the party responsible for an error. Server-side Facebook errors will have a source of "Facebook" and errors caused by the user will have a source of "User".
-- ```error.message```: A detailed description of the request error.
-<br>
-  
-```data```: A list of JSON objects representing the information an endpoint retrieved (will be empty if an error exists).
-<br><br>
-## Endpoints
-- ```/locations```
-  <br>
-  *Response:*
-  <br>
-  Locations which are exact, or close matches, to the search query provided. Latitude and longitude coordinates for a location are required to find Marketplace listings in a targeted area.
-  <br><br>
-  Example:
-  ```json
-  {
-      "status": "Success",
-      "error": {},
-      "data": {
-          "locations": [
-              {
-                  "name": "Houston, Texas",
-                  "latitude": "29.7602",
-                  "longitude": "-95.3694"
-              },
-              {
-                  "name": "Downtown Houston, TX",
-                  "latitude": "29.758767",
-                  "longitude": "-95.361523"
-              },
-              {
-                  "name": "Houston, Mississippi",
-                  "latitude": "33.8981",
-                  "longitude": "-89.0017"
-              },
-              {
-                  "name": "Houston, Alaska",
-                  "latitude": "61.6083",
-                  "longitude": "-149.774"
-              }
-          ]
-      }
-  }
-  ```
-  <br>
-
-  *Required Parameters:*
-  <br>
-  ```js
-  {
-      // A location in which to find the latitude and longitude coordinates
-      "locationQuery": String
-  }
-  ```
 ---
-- ```/search```
-  <br>
-  *Response:*
-  <br>
-  Listings which are exact, or close matches, to the listing query and optional filter(s) provided.
-  <br><br>
-  Example (number of pages/listings displayed and listing's primary photo URL have been removed to shorten this example):
-  ```json
-  {
-      "status": "Success",
-      "error": {}, 
-      "data": {
-          "listingPages": [
-              {
-                  "listings": [
-                      {
-                          "id": "4720490308074106",
-                          "name": "Small sectional couch", 
-                          "currentPrice": "$150",
-                          "previousPrice": "",
-                          "saleIsPending": "false",
-                          "primaryPhotoURL": "Removed to shorten example",
-                          "sellerName": "Cory Yount",
-                          "sellerLocation": "Scottsdale, Arizona",
-                          "sellerType": "User"
-                      },
-                      {
-                          "id": "296832592544544",
-                          "name": "Sectional sofa couch",
-                          "currentPrice": "$400",
-                          "previousPrice": "",
-                          "saleIsPending": "false",
-                          "primaryPhotoURL": "Removed to shorten example",
-                          "sellerName": "Alexis Brown",
-                          "sellerLocation": "Scottsdale, Arizona",
-                          "sellerType": "User"
-                      },
-                      {
-                          "id": "261980506019699",
-                          "name": "Living spaces couch",
-                          "currentPrice": "$600",
-                          "previousPrice": "",
-                          "saleIsPending": "false",
-                          "primaryPhotoURL": "Removed to shorten example",
-                          "sellerName": "Chelsea Markley",
-                          "sellerLocation": "Scottsdale, Arizona",
-                          "sellerType": "User"
-                      },
-                      {
-                          "id": "683280016149318",
-                          "name": "Beige couch",
-                          "currentPrice": "$100",
-                          "previousPrice": "",
-                          "saleIsPending": "false",
-                          "primaryPhotoURL": "Removed to shorten example",
-                          "sellerName": "Sarah Wilke",
-                          "sellerLocation": "Phoenix, Arizona",
-                          "sellerType": "User"
-                      },
-                      {
-                          "id": "545545826911162",
-                          "name": "BRAND NEW gray L shaped couch with reversible chaise!",
-                          "currentPrice": "$450",
-                          "previousPrice": "$480",
-                          "saleIsPending": "false",
-                          "primaryPhotoURL": "Removed to shorten example",
-                          "sellerName": "Jamie Clark Hopkins",
-                          "sellerLocation": "Paradise Valley, Arizona",
-                          "sellerType": "User"
-                      },
-                      {
-                          "id": "321297783315616",
-                          "name": "Leather Couch Set",
-                          "currentPrice": "$150",
-                          "previousPrice": "",
-                          "saleIsPending": "false",
-                          "primaryPhotoURL": "Removed to shorten example",
-                          "sellerName": "Samantha Crosner",
-                          "sellerLocation": "Scottsdale, Arizona",
-                          "sellerType": "User"
-                      }
-                  ]
-              }
-          ]
-      }
-  }
-  ```
-  <br>
 
-  *Required Parameters:*
-  <br>
-  ```js
-  {
-      // The latitude coordinate of the search location
-      "locationLatitude": String,
-      // The longitude coordinate of the search location
-      "locationLongitude": String,
-      // Keywords for which listings to retrieve
-      "listingQuery": String
-  } 
-  ```
+### Endpoints
+
+#### 1. `/locations`
+Retrieves locations which are exact or close matches to the query. Latitude and longitude are required for the `/search` endpoint.
+
+**Method:** `GET`
+
+**Parameters:**
+* `locationQuery` (String, Required) - A location name to search for.
+
+**Example Request:** `/locations?locationQuery=Houston`
+
+**Example Response:**
+```json
+{
+    "status": "Success",
+    "error": {},
+    "data": {
+        "locations": [
+            {
+                "name": "Houston, Texas",
+                "latitude": "29.7602",
+                "longitude": "-95.3694"
+            }
+        ]
+    }
+}
+```
+
+#### 2. `/search`
+Retrieves listings matching the provided query, coordinates, and filters.
+
+**Method:** `GET`
+
+**Parameters:**
+* `locationLatitude` (String, Required) - Latitude coordinate.
+* `locationLongitude` (String, Required) - Longitude coordinate.
+* `listingQuery` (String, Required) - Keywords to search for.
+* `numPageResults` (Integer, Optional) - Number of pages to load in a single request (Default: 1).
+* `minPrice` (Integer, Optional) - Minimum price bound.
+* `maxPrice` (Integer, Optional) - Maximum price bound.
+* `cursor` (String, Optional) - Pagination cursor to get the next page of results.
+
+**Example Request:** `/search?locationLatitude=29.7602&locationLongitude=-95.3694&listingQuery=couch&minPrice=100&maxPrice=500`
+
+**Example Response:**
+```json
+{
+    "status": "Success",
+    "error": {}, 
+    "data": {
+        "listingPages": [
+            {
+                "listings": [
+                    {
+                        "id": "4720490308074106",
+                        "name": "Small sectional couch", 
+                        "currentPrice": "$150",
+                        "previousPrice": "",
+                        "saleIsPending": "false",
+                        "primaryPhotoURL": "https://...",
+                        "sellerName": "John Doe",
+                        "sellerLocation": "Houston, Texas",
+                        "sellerType": "User"
+                    }
+                ]
+            }
+        ],
+        "page_info": {
+            "end_cursor": "AQAxYz...==",
+            "has_next_page": true
+        }
+    }
+}
+```
+*(Note: To fetch the next page, pass the `end_cursor` value into the `cursor` parameter on your next request).*
