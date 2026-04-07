@@ -14,9 +14,9 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLineEdit, QPushButton, QListWidget, QListWidgetItem, QLabel,
     QTextEdit, QSplitter, QMessageBox, QProgressBar, QComboBox,
-    QDialog, QCheckBox, QFrame, QSizePolicy
+    QDialog, QCheckBox, QFrame, QSizePolicy, QFileDialog
 )
-from PyQt5.QtCore import QThread, pyqtSignal, Qt
+from PyQt5.QtCore import QThread, pyqtSignal, Qt, QTimer, QSize
 from PyQt5.QtGui import QPixmap, QFont, QPainter
 
 
@@ -165,7 +165,7 @@ class SettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Settings")
-        self.setFixedSize(400, 320)
+        self.setFixedSize(400, 380)
         
         layout = QVBoxLayout(self)
         
@@ -178,6 +178,14 @@ class SettingsDialog(QDialog):
         self.pages_input.setPlaceholderText("Number of pages per load (default: 1)")
         layout.addWidget(QLabel("Pages per load (24 items per page):"))
         layout.addWidget(self.pages_input)
+        
+        self.page_delay_input = QLineEdit()
+        self.page_delay_input.setPlaceholderText("Seconds between pagination loads (e.g. 2.0)")
+        layout.addWidget(QLabel("Pagination Delay (Seconds):"))
+        layout.addWidget(self.page_delay_input)
+        
+        self.sort_batches_cb = QCheckBox("Sort each load batch separately (with divider)")
+        layout.addWidget(self.sort_batches_cb)
         
         self.bg_desc_cb = QCheckBox("Fetch descriptions in background")
         self.bg_img_cb = QCheckBox("Fetch images in background (High Ban Risk)")
@@ -211,7 +219,6 @@ class WishlistPopup(QWidget):
     updated = pyqtSignal(str)
 
     def __init__(self, existing_wishlists, current_wishlist="Default", parent=None):
-        # Using Qt.Popup creates an inline popup that vanishes when clicking away
         super().__init__(parent, Qt.Popup)
         self.setAttribute(Qt.WA_StyledBackground, True)
         self.setStyleSheet("""
@@ -382,7 +389,7 @@ class SortTierWidget(QFrame):
 
 
 class ListingItemWidget(QWidget):
-    fav_clicked = pyqtSignal(bool, QWidget) # Emits True/False and the button widget reference
+    fav_clicked = pyqtSignal(bool, QWidget) 
     
     def __init__(self, title, price, is_fav=False):
         super().__init__()
@@ -432,12 +439,13 @@ class CustomListWidgetItem(QListWidgetItem):
 
 class SearchWorker(QThread):
     finished = pyqtSignal(list, str, str, bool, str, str)
-    def __init__(self, location, query, pages=1, min_price=None, max_price=None, cursor=None, lat=None, lng=None):
+    def __init__(self, location, query, pages=1, min_price=None, max_price=None, cursor=None, lat=None, lng=None, delay=0.0):
         super().__init__()
         self.location, self.query, self.pages, self.min_price, self.max_price = location, query, pages, min_price, max_price
         self.cursor = cursor
         self.lat = lat
         self.lng = lng
+        self.delay = delay
         
     def run(self):
         if not self.lat or not self.lng:
@@ -453,7 +461,8 @@ class SearchWorker(QThread):
             
         status, error, list_data = MarketplaceScraper.getListings(
             self.lat, self.lng, self.query, numPageResults=self.pages, 
-            minPrice=self.min_price, maxPrice=self.max_price, cursor=self.cursor
+            minPrice=self.min_price, maxPrice=self.max_price, cursor=self.cursor,
+            delay=self.delay
         )
         if status != "Success":
             self.finished.emit([], f"Error fetching listings: {error.get('message')}", None, False, self.lat, self.lng)
@@ -617,6 +626,8 @@ class MarketplaceApp(QMainWindow):
         self.current_cursor = None
         self.has_next_page = False
         self.is_loading_more = False
+        self.is_search_all = False
+        self.current_batch_id = 0
         self.current_lat = None
         self.current_lng = None
         
@@ -660,6 +671,8 @@ class MarketplaceApp(QMainWindow):
             "proxy": "", 
             "auto_clear": False,
             "pages_per_load": 1,
+            "page_delay": 2.0,
+            "sort_batches": True,
             "bg_descriptions": False,
             "bg_images": False,
             "bg_rate_limit": 2.0,
@@ -706,6 +719,8 @@ class MarketplaceApp(QMainWindow):
         dlg.proxy_input.setText(self.settings.get("proxy", ""))
         dlg.auto_clear_cb.setChecked(self.settings.get("auto_clear", False))
         dlg.pages_input.setText(str(self.settings.get("pages_per_load", 1)))
+        dlg.page_delay_input.setText(str(self.settings.get("page_delay", 2.0)))
+        dlg.sort_batches_cb.setChecked(self.settings.get("sort_batches", True))
         dlg.bg_desc_cb.setChecked(self.settings.get("bg_descriptions", False))
         dlg.bg_img_cb.setChecked(self.settings.get("bg_images", False))
         dlg.rate_limit_input.setText(str(self.settings.get("bg_rate_limit", 2.0)))
@@ -713,12 +728,20 @@ class MarketplaceApp(QMainWindow):
         if dlg.exec_():
             self.settings["proxy"] = dlg.proxy_input.text().strip()
             self.settings["auto_clear"] = dlg.auto_clear_cb.isChecked()
+            self.settings["sort_batches"] = dlg.sort_batches_cb.isChecked()
             self.settings["bg_descriptions"] = dlg.bg_desc_cb.isChecked()
             self.settings["bg_images"] = dlg.bg_img_cb.isChecked()
+            
             try:
                 self.settings["pages_per_load"] = int(dlg.pages_input.text().strip())
             except ValueError:
                 self.settings["pages_per_load"] = 1
+                
+            try:
+                self.settings["page_delay"] = float(dlg.page_delay_input.text().strip())
+            except ValueError:
+                self.settings["page_delay"] = 2.0
+                
             try:
                 self.settings["bg_rate_limit"] = float(dlg.rate_limit_input.text().strip())
             except ValueError:
@@ -732,6 +755,8 @@ class MarketplaceApp(QMainWindow):
             self.bg_worker.delay = self.settings["bg_rate_limit"]
             if not self.settings["bg_descriptions"] and not self.settings["bg_images"]:
                 self.bg_worker.clear_queue()
+                
+            self.apply_filter_and_sort()
 
     def apply_proxy(self):
         proxy_str = self.settings.get("proxy", "")
@@ -834,6 +859,8 @@ class MarketplaceApp(QMainWindow):
         self.fav_view_btn = QPushButton("❤ Favs")
         self.fav_view_btn.setFixedSize(70, 30)
         self.fav_view_btn.clicked.connect(self.show_favorites)
+        self.save_res_btn = QPushButton("Save")
+        self.load_res_btn = QPushButton("Load")
         
         self.back_btn = QPushButton("← Back")
         self.back_btn.setFixedSize(70, 30)
@@ -853,6 +880,7 @@ class MarketplaceApp(QMainWindow):
         self.max_price_input.setPlaceholderText("Max $")
         self.max_price_input.setFixedWidth(60)
         self.search_btn = QPushButton("Search")
+        self.search_all_btn = QPushButton("Search All")
         
         self.loc_input.textChanged.connect(self.save_current_settings)
         self.query_input.textChanged.connect(self.save_current_settings)
@@ -868,6 +896,7 @@ class MarketplaceApp(QMainWindow):
         search_layout.addWidget(QLabel("-"))
         search_layout.addWidget(self.max_price_input)
         search_layout.addWidget(self.search_btn)
+        search_layout.addWidget(self.search_all_btn)
         
         self.fav_container = QWidget()
         fav_layout = QHBoxLayout(self.fav_container)
@@ -889,6 +918,8 @@ class MarketplaceApp(QMainWindow):
         
         top_layout.addWidget(self.settings_btn)
         top_layout.addWidget(self.fav_view_btn)
+        top_layout.addWidget(self.save_res_btn)
+        top_layout.addWidget(self.load_res_btn)
         top_layout.addWidget(self.back_btn)
         top_layout.addWidget(self.search_container)
         top_layout.addWidget(self.fav_container)
@@ -986,6 +1017,9 @@ class MarketplaceApp(QMainWindow):
         self.setCentralWidget(container)
         
         self.search_btn.clicked.connect(self.perform_search)
+        self.search_all_btn.clicked.connect(self.perform_search_all)
+        self.save_res_btn.clicked.connect(self.save_results)
+        self.load_res_btn.clicked.connect(self.load_results)
         self.list_widget.itemSelectionChanged.connect(self.on_item_selected)
 
     def keyPressEvent(self, event):
@@ -1016,6 +1050,70 @@ class MarketplaceApp(QMainWindow):
             self.fullscreen_viewer.set_image(self.image_cache[url])
         else:
             self.fullscreen_viewer.set_text("Loading...")
+
+    def save_results(self):
+        if not self.listings:
+            QMessageBox.warning(self, "Warning", "No results to save.")
+            return
+        
+        query_clean = re.sub(r'[^a-zA-Z0-9_\- ]', '', self.current_query).strip().replace(' ', '_')
+        if not query_clean:
+            query_clean = "search"
+            
+        date_str = datetime.datetime.now().strftime("%Y-%m-%d")
+        default_filename = f"{query_clean}_{date_str}_results.json"
+        
+        filepath, _ = QFileDialog.getSaveFileName(self, "Save Results", default_filename, "JSON Files (*.json)")
+        if not filepath: return
+        
+        save_data = {
+            "query": self.current_query,
+            "location": self.current_loc,
+            "listings": self.listings,
+            "details": self.listing_details
+        }
+        
+        try:
+            with open(filepath, "w", encoding="utf-8") as f:
+                json.dump(save_data, f, indent=4, ensure_ascii=False)
+            self.status_lbl.setText(f"Saved results to {os.path.basename(filepath)}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to save results: {e}")
+
+    def load_results(self):
+        filepath, _ = QFileDialog.getOpenFileName(self, "Load Results", "", "JSON Files (*.json)")
+        if not filepath: return
+        
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            
+            self.listings = data.get("listings", [])
+            self.listing_details = data.get("details", {})
+            self.current_query = data.get("query", "")
+            self.current_loc = data.get("location", "")
+            
+            self.query_input.setText(self.current_query)
+            self.loc_input.setText(self.current_loc)
+            
+            self.current_cursor = None
+            self.has_next_page = False
+            self.is_search_all = False
+            self.search_all_btn.setText("Search All")
+            self.search_all_btn.setEnabled(True)
+            self.search_btn.setEnabled(True)
+            
+            self.current_batch_id = 0
+            for item in self.listings:
+                if item.get("batch_id", 0) > self.current_batch_id:
+                    self.current_batch_id = item["batch_id"]
+            
+            self.populate_list(self.listings, append=False)
+            loaded_count = len([i for i in self.listings if not i.get('is_divider')])
+            self.status_lbl.setText(f"Loaded {loaded_count} results from {os.path.basename(filepath)}")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to load results: {e}")
 
     def on_filter_sort_changed(self):
         self.apply_filter_and_sort()
@@ -1141,7 +1239,6 @@ class MarketplaceApp(QMainWindow):
         item_id = item_data["id"]
         
         if checked:
-            # 1. Immediately save to default (or preserve existing metadata if reapplying)
             fav_item = dict(item_data)
             details = self.listing_details.get(item_id, {})
             cat = details.get("category", "Unknown")
@@ -1153,14 +1250,11 @@ class MarketplaceApp(QMainWindow):
             self.favorites[item_id] = fav_item
             self.save_favorites()
             
-            # 2. Show the optional inline Wishlist popup immediately beneath the heart
             existing_wls = set(itm.get("saved_wishlist", "Default") for itm in self.favorites.values())
             self.wishlist_popup = WishlistPopup(existing_wls, "Default", self)
             
-            # When the user submits the popup, update the item
             self.wishlist_popup.updated.connect(lambda wl, i_id=item_id: self.update_item_wishlist(i_id, wl))
             
-            # Position the popup right below the clicked heart button
             global_pos = button_widget.mapToGlobal(button_widget.rect().bottomLeft())
             self.wishlist_popup.move(global_pos)
             self.wishlist_popup.show()
@@ -1170,11 +1264,9 @@ class MarketplaceApp(QMainWindow):
                 del self.favorites[item_id]
             self.save_favorites()
             
-            # Close the popup if it was open while unfavoriting
             if self.wishlist_popup and self.wishlist_popup.isVisible():
                 self.wishlist_popup.close()
         
-        # Keep the visual state of the heart in sync across both panes
         if self.current_item and self.current_item["id"] == item_id:
             self.details_fav_btn.blockSignals(True)
             self.details_fav_btn.setChecked(checked)
@@ -1183,7 +1275,8 @@ class MarketplaceApp(QMainWindow):
 
         for i in range(self.list_widget.count()):
             list_item = self.list_widget.item(i)
-            if list_item.data(Qt.UserRole)["id"] == item_id:
+            data = list_item.data(Qt.UserRole)
+            if not data.get("is_divider") and data["id"] == item_id:
                 widget = self.list_widget.itemWidget(list_item)
                 if hasattr(widget, 'fav_btn'):
                     widget.fav_btn.blockSignals(True)
@@ -1197,7 +1290,6 @@ class MarketplaceApp(QMainWindow):
             self.favorites[item_id]["saved_wishlist"] = new_wishlist
             self.save_favorites()
             
-            # If the user is currently looking at favorites grouped by wishlist, update the view
             if self.in_favorites_view and self.fav_mode_combo.currentText() == "Wishlist":
                 self.update_fav_values()
 
@@ -1206,12 +1298,31 @@ class MarketplaceApp(QMainWindow):
             self.on_fav_toggled(self.current_item, checked, self.details_fav_btn)
 
     def perform_search(self):
+        self.is_search_all = False
+        self.search_all_btn.setText("Search All")
+        self.perform_search_internal()
+        
+    def perform_search_all(self):
+        if self.is_search_all:
+            self.is_search_all = False
+            self.search_all_btn.setText("Search All")
+            self.status_lbl.setText("Search All stopped.")
+            self.search_btn.setEnabled(True)
+            return
+
+        self.is_search_all = True
+        self.search_all_btn.setText("Stop Search All")
+        self.perform_search_internal()
+
+    def perform_search_internal(self):
         self.current_loc = self.loc_input.text().strip()
         self.current_query = self.query_input.text().strip()
         self.current_min_price = self.min_price_input.text().strip()
         self.current_max_price = self.max_price_input.text().strip()
         
         if not self.current_loc or not self.current_query:
+            self.is_search_all = False
+            self.search_all_btn.setText("Search All")
             return QMessageBox.warning(self, "Input Error", "Please provide both location and query.")
             
         self.save_current_settings()
@@ -1220,6 +1331,7 @@ class MarketplaceApp(QMainWindow):
         self.has_next_page = False
         self.current_lat = None
         self.current_lng = None
+        self.current_batch_id = 0
         
         self.list_widget.clear()
         self.listings.clear()
@@ -1234,13 +1346,17 @@ class MarketplaceApp(QMainWindow):
             
         self.is_loading_more = True
         pages = int(self.settings.get("pages_per_load", 1))
+        delay = float(self.settings.get("page_delay", 2.0))
         
         if not is_load_more:
             self.search_btn.setEnabled(False)
+            if not self.is_search_all:
+                self.search_all_btn.setEnabled(False)
             self.status_lbl.setText("Searching listings...")
             self.progress_bar.setVisible(True)
             self.progress_bar.setRange(0, 0)
         else:
+            self.current_batch_id += 1
             self.status_lbl.setText(f"Loading more listings... (Loaded: {len(self.listings)})")
             self.progress_bar.setVisible(True)
             self.progress_bar.setRange(0, 0)
@@ -1251,7 +1367,8 @@ class MarketplaceApp(QMainWindow):
             max_price=self.current_max_price,
             cursor=self.current_cursor,
             lat=self.current_lat,
-            lng=self.current_lng
+            lng=self.current_lng,
+            delay=delay
         )
         self.search_worker.finished.connect(
             lambda lst, err, cur, has_next, lat, lng, is_lm=is_load_more:
@@ -1261,10 +1378,13 @@ class MarketplaceApp(QMainWindow):
 
     def on_search_finished(self, listings, error, cursor, has_next, lat, lng, is_load_more):
         self.is_loading_more = False
-        self.search_btn.setEnabled(True)
         self.progress_bar.setVisible(False)
         
         if error:
+            self.search_btn.setEnabled(True)
+            self.search_all_btn.setEnabled(True)
+            self.search_all_btn.setText("Search All")
+            self.is_search_all = False
             self.status_lbl.setText("Search failed." if not is_load_more else "Failed to load more.")
             return QMessageBox.critical(self, "Search Error", error)
             
@@ -1273,16 +1393,40 @@ class MarketplaceApp(QMainWindow):
         self.current_lat = lat
         self.current_lng = lng
         
+        existing_ids = {item["id"] for item in self.listings if not item.get("is_divider")}
+        new_batch_unique = []
+        
+        for item in listings:
+            if item["id"] not in existing_ids:
+                item["batch_id"] = self.current_batch_id
+                new_batch_unique.append(item)
+                existing_ids.add(item["id"])
+        
         if not is_load_more:
-            self.listings = listings
+            self.listings = new_batch_unique
+            self.status_lbl.setText(f"Found {len(self.listings)} listings. Gathering details...")
+            self.populate_list(new_batch_unique, append=False)
         else:
-            self.listings.extend(listings)
-            
-        self.status_lbl.setText(f"Found {len(self.listings)} listings. Gathering details...")
-        self.populate_list(listings, append=is_load_more)
+            if new_batch_unique:
+                divider = {"id": f"divider_{self.current_batch_id}", "is_divider": True, "batch_id": self.current_batch_id}
+                self.listings.append(divider)
+                self.listings.extend(new_batch_unique)
+                self.status_lbl.setText(f"Loaded {len(new_batch_unique)} more items. Gathering details...")
+                self.populate_list([divider] + new_batch_unique, append=True)
+            else:
+                self.status_lbl.setText("Loaded more pages, but no new unique items found.")
+
+        if not self.is_search_all or not self.has_next_page:
+            self.search_btn.setEnabled(True)
+            self.search_all_btn.setEnabled(True)
+            self.search_all_btn.setText("Search All")
+            self.is_search_all = False
+        elif self.is_search_all and self.has_next_page:
+            delay_ms = int(self.settings.get("page_delay", 2.0) * 1000)
+            QTimer.singleShot(delay_ms, lambda: self.load_listings(is_load_more=True))
         
     def on_scroll(self, value):
-        if self.in_favorites_view:
+        if self.in_favorites_view or self.is_search_all:
             return
             
         scrollbar = self.list_widget.verticalScrollBar()
@@ -1296,10 +1440,25 @@ class MarketplaceApp(QMainWindow):
             self.bg_worker.clear_queue()
         
         for item in listings_to_show:
+            if item.get("is_divider"):
+                list_item = CustomListWidgetItem(self)
+                list_item.setData(Qt.UserRole, item)
+                
+                divider_widget = QFrame()
+                divider_widget.setFrameShape(QFrame.HLine)
+                divider_widget.setFrameShadow(QFrame.Plain)
+                divider_widget.setStyleSheet("color: black; background-color: black; border: 2px solid black; margin-top: 5px; margin-bottom: 5px;")
+                divider_widget.setFixedHeight(12)
+                
+                list_item.setSizeHint(QSize(300, 22))
+                list_item.setFlags(list_item.flags() & ~Qt.ItemIsSelectable)
+                self.list_widget.addItem(list_item)
+                self.list_widget.setItemWidget(list_item, divider_widget)
+                continue
+
             list_item = CustomListWidgetItem(self)
             is_fav = item["id"] in self.favorites
             custom_widget = ListingItemWidget(item.get("name", "Unknown"), item.get("currentPrice", "Unknown"), is_fav)
-            # Pass the button itself using lambda
             custom_widget.fav_clicked.connect(lambda checked, btn, itm=item: self.on_fav_toggled(itm, checked, btn))
             
             list_item.setSizeHint(custom_widget.sizeHint())
@@ -1310,7 +1469,8 @@ class MarketplaceApp(QMainWindow):
             if item["id"] not in self.listing_details:
                 self.bg_worker.add_item(item["id"])
         
-        self.thumb_worker.add_items(listings_to_show)
+        non_dividers = [i for i in listings_to_show if not i.get("is_divider")]
+        self.thumb_worker.add_items(non_dividers)
         self.apply_filter_and_sort()
 
     def on_thumbnail_fetched(self, item_id, image_bytes):
@@ -1318,7 +1478,8 @@ class MarketplaceApp(QMainWindow):
         if pixmap.loadFromData(image_bytes):
             for i in range(self.list_widget.count()):
                 list_item = self.list_widget.item(i)
-                if list_item.data(Qt.UserRole)["id"] == item_id:
+                data = list_item.data(Qt.UserRole)
+                if not data.get("is_divider") and data["id"] == item_id:
                     widget = self.list_widget.itemWidget(list_item)
                     if isinstance(widget, ListingItemWidget):
                         widget.set_thumbnail(pixmap)
@@ -1338,9 +1499,11 @@ class MarketplaceApp(QMainWindow):
             
         self.apply_filter_and_sort()
         selected = self.list_widget.selectedItems()
-        if selected and selected[0].data(Qt.UserRole)["id"] == item_id:
-            self.update_right_panel(selected[0].data(Qt.UserRole))
-            self.setup_images_for_item(selected[0].data(Qt.UserRole))
+        if selected:
+            data = selected[0].data(Qt.UserRole)
+            if not data.get("is_divider") and data["id"] == item_id:
+                self.update_right_panel(data)
+                self.setup_images_for_item(data)
             
     def on_demand_fetched(self, item_id, details):
         if item_id not in self.listing_details:
@@ -1356,14 +1519,22 @@ class MarketplaceApp(QMainWindow):
             
         self.apply_filter_and_sort()
         selected = self.list_widget.selectedItems()
-        if selected and selected[0].data(Qt.UserRole)["id"] == item_id:
-            self.update_right_panel(selected[0].data(Qt.UserRole))
-            self.setup_images_for_item(selected[0].data(Qt.UserRole))
+        if selected:
+            data = selected[0].data(Qt.UserRole)
+            if not data.get("is_divider") and data["id"] == item_id:
+                self.update_right_panel(data)
+                self.setup_images_for_item(data)
 
     def apply_filter_and_sort(self):
+        sort_batches = self.settings.get("sort_batches", True)
         for i in range(self.list_widget.count()):
             item = self.list_widget.item(i)
             data = item.data(Qt.UserRole)
+            
+            if data.get("is_divider"):
+                item.setHidden(not sort_batches)
+                continue
+                
             details = self.listing_details.get(data["id"], {})
             
             title = str(data.get("name", "")).lower()
@@ -1377,7 +1548,7 @@ class MarketplaceApp(QMainWindow):
                     break
             item.setHidden(not visible)
 
-        if self.sort_tiers:
+        if self.sort_tiers or sort_batches:
             self.list_widget.sortItems(Qt.AscendingOrder)
             
     def get_tier_value(self, tier, data, details):
@@ -1404,8 +1575,29 @@ class MarketplaceApp(QMainWindow):
     def compare_items(self, item1, item2):
         d1 = item1.data(Qt.UserRole)
         d2 = item2.data(Qt.UserRole)
-        det1 = self.listing_details.get(d1['id'], {})
-        det2 = self.listing_details.get(d2['id'], {})
+        
+        if self.settings.get("sort_batches", True):
+            b1 = d1.get("batch_id", 0)
+            b2 = d2.get("batch_id", 0)
+            if b1 != b2:
+                return b1 < b2
+            
+            div1 = d1.get("is_divider", False)
+            div2 = d2.get("is_divider", False)
+            if div1 and not div2:
+                return True
+            if div2 and not div1:
+                return False
+            if div1 and div2:
+                return False
+        else:
+            div1 = d1.get("is_divider", False)
+            div2 = d2.get("is_divider", False)
+            if div1 and not div2: return True
+            if div2 and not div1: return False
+
+        det1 = self.listing_details.get(d1.get('id'), {})
+        det2 = self.listing_details.get(d2.get('id'), {})
         
         for tier in self.sort_tiers:
             v1 = self.get_tier_value(tier, d1, det1)
@@ -1423,6 +1615,9 @@ class MarketplaceApp(QMainWindow):
         if not selected: return
         
         item_data = selected[0].data(Qt.UserRole)
+        if item_data.get("is_divider"):
+            return
+            
         item_id = item_data["id"]
         
         details = self.listing_details.get(item_id, {})

@@ -2,6 +2,7 @@ import requests
 import json
 import copy
 import os
+import time
 
 GRAPHQL_URL = "https://www.facebook.com/api/graphql/"
 GRAPHQL_HEADERS = {
@@ -73,7 +74,7 @@ def getLocations(locationQuery):
 
     return (status, error, data)
 
-def getListings(locationLatitude, locationLongitude, listingQuery, numPageResults=1, minPrice=None, maxPrice=None, cursor=None):
+def getListings(locationLatitude, locationLongitude, listingQuery, numPageResults=1, minPrice=None, maxPrice=None, cursor=None, delay=0.0):
     data = {}
     rawPageResults = []
     
@@ -130,6 +131,9 @@ def getListings(locationLatitude, locationLongitude, listingQuery, numPageResult
         if not next_cursor:
             break
 
+        if delay > 0:
+            time.sleep(delay)
+
         requestPayloadCopy = copy.copy(requestPayload)
         
         try:
@@ -147,7 +151,6 @@ def getListings(locationLatitude, locationLongitude, listingQuery, numPageResult
         facebookResponseJSON = json.loads(facebookResponse.text)
         rawPageResults.append(facebookResponseJSON)
 
-    # Fetching the final page details to provide for the next cycle
     finalPageInfo = safe_get(facebookResponseJSON, "data", "marketplace_search", "feed_units", "page_info") or {}
 
     data["listingPages"] = parsePageResults(rawPageResults)
@@ -170,7 +173,6 @@ def getListingDetails(listingID):
         try:
             with open(cache_path, "r", encoding="utf-8") as f:
                 res_json = json.load(f)
-                # Purge cache if it contains rate limit errors or is completely empty
                 if res_json.get("errors") or not safe_get(res_json, "data", "viewer", "marketplace_product_details_page", "target"):
                     res_json = None
                     try: os.remove(cache_path)
@@ -215,7 +217,6 @@ def getListingDetails(listingID):
         try:
             res_json = json.loads(facebookResponse.text)
             
-            # Validate payload BEFORE caching to prevent saving Rate Limit data
             target = safe_get(res_json, "data", "viewer", "marketplace_product_details_page", "target")
             if target is not None:
                 with open(cache_path, "w", encoding="utf-8") as f:
@@ -288,7 +289,6 @@ def getListingImages(listingID):
         try:
             res_json = json.loads(facebookResponse.text)
             
-            # Validate payload BEFORE caching
             photos = safe_get(res_json, "data", "viewer", "marketplace_product_details_page", "target", "listing_photos")
             if photos is not None:
                 with open(cache_path, "w", encoding="utf-8") as f:
