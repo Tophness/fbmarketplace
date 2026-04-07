@@ -1,13 +1,36 @@
 import requests
 import json
 import copy
+import os
 
 GRAPHQL_URL = "https://www.facebook.com/api/graphql/"
 GRAPHQL_HEADERS = {
-    "sec-fetch-site": "same-origin",
-    "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/99.0.4844.74 Safari/537.36"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
 }
+PROXY_CONFIG = {}
 
+SCRAPER_SESSION = requests.Session()
+
+def update_session_proxy(proxies):
+    SCRAPER_SESSION.proxies = proxies
+    SCRAPER_SESSION.cookies.clear()
+
+def safe_get(obj, *keys, default=None):
+    try:
+        for key in keys:
+            if obj is None:
+                return default
+            obj = obj.get(key)
+        return obj if obj is not None else default
+    except AttributeError:
+        return default
 
 def getLocations(locationQuery):
     data = {}
@@ -19,157 +42,323 @@ def getLocations(locationQuery):
 
     status, error, facebookResponse = getFacebookResponse(requestPayload)
 
-    if (status == "Success"):
-        data["locations"] = []  # Create a locations object within data
+    if status == "Success":
+        data["locations"] = []
         facebookResponseJSON = json.loads(facebookResponse.text)
 
-        # Get location names and their ID from the facebook response
-        for location in facebookResponseJSON["data"]["city_street_search"]["street_results"]["edges"]:
-            locationName = location["node"]["subtitle"].split(" \u00b7")[0]
+        edges = safe_get(facebookResponseJSON, "data", "city_street_search", "street_results", "edges", default=[])
 
-            # Refine location name if it is too general
-            if (locationName == "City"):
-                locationName = location["node"]["single_line_address"]
+        for location in edges:
+            node = location.get("node", {})
 
-            locationLatitude = location["node"]["location"]["latitude"]
-            locationLongitude = location["node"]["location"]["longitude"]
+            locationName = safe_get(node, "subtitle", default="")
+            if locationName:
+                locationName = locationName.split(" \u00b7")[0]
 
-            # Add the location to the list of locations
-            data["locations"].append({
-                "name": locationName,
-                "latitude": str(locationLatitude),
-                "longitude": str(locationLongitude)
-            })
+            if locationName == "City" or not locationName:
+                locationName = safe_get(node, "single_line_address", default="")
+                
+            if not locationName:
+                locationName = safe_get(node, "name", default="Unknown Location")
+
+            lat = safe_get(node, "location", "latitude")
+            lng = safe_get(node, "location", "longitude")
+
+            if lat and lng:
+                data["locations"].append({
+                    "name": locationName,
+                    "latitude": str(lat),
+                    "longitude": str(lng)
+                })
 
     return (status, error, data)
 
-
-def getListings(locationLatitude, locationLongitude, listingQuery, numPageResults=1):
+def getListings(locationLatitude, locationLongitude, listingQuery, numPageResults=1, minPrice=None, maxPrice=None, cursor=None):
     data = {}
+    rawPageResults = []
+    
+    try: lower_bound = int(minPrice) * 100
+    except: lower_bound = 0
+    
+    try: upper_bound = int(maxPrice) * 100
+    except: upper_bound = 214748364700
 
-    rawPageResults = []  # Un-parsed list of JSON results from each page
+    variables_dict = {
+        "count": 24,
+        "params": {
+            "bqf": {
+                "callsite": "COMMERCE_MKTPLACE_WWW", 
+                "query": listingQuery
+            },
+            "browse_request_params": {
+                "commerce_enable_local_pickup": True,
+                "commerce_enable_shipping": True,
+                "commerce_search_and_rp_available": True,
+                "filter_location_latitude": float(locationLatitude),
+                "filter_location_longitude": float(locationLongitude),
+                "filter_price_lower_bound": lower_bound,
+                "filter_price_upper_bound": upper_bound,
+                "filter_radius_km": 20
+            },
+            "custom_request_params": {"surface": "SEARCH"}
+        }
+    }
+
+    if cursor:
+        variables_dict["cursor"] = cursor
 
     requestPayload = {
-        "variables": """{"count":24, "params":{"bqf":{"callsite":"COMMERCE_MKTPLACE_WWW","query":"%s"},"browse_request_params":{"commerce_enable_local_pickup":true,"commerce_enable_shipping":true,"commerce_search_and_rp_available":true,"commerce_search_and_rp_condition":null,"commerce_search_and_rp_ctime_days":null,"filter_location_latitude":%s,"filter_location_longitude":%s,"filter_price_lower_bound":0,"filter_price_upper_bound":214748364700,"filter_radius_km":16},"custom_request_params":{"surface":"SEARCH"}}}""" % (listingQuery, locationLatitude, locationLongitude),
+        "variables": json.dumps(variables_dict),
         "doc_id": "7111939778879383"
     }
 
     status, error, facebookResponse = getFacebookResponse(requestPayload)
 
-    if (status == "Success"):
+    if status != "Success":
+        return (status, error, data)
+
+    facebookResponseJSON = json.loads(facebookResponse.text)
+    rawPageResults.append(facebookResponseJSON)
+
+    for _ in range(1, numPageResults):
+        pageInfo = safe_get(facebookResponseJSON, "data", "marketplace_search", "feed_units", "page_info")
+
+        if not pageInfo or not pageInfo.get("has_next_page"):
+            break
+
+        next_cursor = pageInfo.get("end_cursor")
+        if not next_cursor:
+            break
+
+        requestPayloadCopy = copy.copy(requestPayload)
+        
+        try:
+            vars_dict = json.loads(requestPayloadCopy["variables"])
+            vars_dict["cursor"] = next_cursor
+            requestPayloadCopy["variables"] = json.dumps(vars_dict)
+        except Exception:
+            break
+
+        next_status, next_error, facebookResponse = getFacebookResponse(requestPayloadCopy)
+
+        if next_status != "Success":
+            break
+
         facebookResponseJSON = json.loads(facebookResponse.text)
         rawPageResults.append(facebookResponseJSON)
 
-        # Retrieve subsequent page results if numPageResults > 1
-        for _ in range(1, numPageResults):
-            pageInfo = facebookResponseJSON["data"]["marketplace_search"]["feed_units"]["page_info"]
+    # Fetching the final page details to provide for the next cycle
+    finalPageInfo = safe_get(facebookResponseJSON, "data", "marketplace_search", "feed_units", "page_info") or {}
 
-            # If a next page of results exists
-            if (pageInfo["has_next_page"]):
-                cursor = facebookResponseJSON["data"]["marketplace_search"]["feed_units"]["page_info"]["end_cursor"]
-
-                # Make a copy of the original request payload
-                requestPayloadCopy = copy.copy(requestPayload)
-
-                # Insert the cursor object into the variables object of the request payload copy
-                requestPayloadCopy["variables"] = requestPayloadCopy["variables"].split(
-                )
-                requestPayloadCopy["variables"].insert(
-                    1, """"cursor":'{}',""".format(cursor))
-                requestPayloadCopy["variables"] = "".join(
-                    requestPayloadCopy["variables"])
-
-                status, error, facebookResponse = getFacebookResponse(
-                    requestPayloadCopy)
-
-                if (status == "Success"):
-                    facebookResponseJSON = json.loads(facebookResponse.text)
-                    rawPageResults.append(facebookResponseJSON)
-                else:
-                    return (status, error, data)
-    else:
-        return (status, error, data)
-
-    # Parse the raw page results and set as the value of listingPages
     data["listingPages"] = parsePageResults(rawPageResults)
-    return (status, error, data)
+    data["page_info"] = {
+        "end_cursor": finalPageInfo.get("end_cursor"),
+        "has_next_page": finalPageInfo.get("has_next_page", False)
+    }
 
+    return ("Success", {}, data)
 
-# Helper function
-def getFacebookResponse(requestPayload):
-    status = "Success"
-    error = {}
+def getListingDetails(listingID):
+    data = {}
+    cache_dir = "cache"
+    os.makedirs(cache_dir, exist_ok=True)
+    cache_path = os.path.join(cache_dir, f"listing_{listingID}.json")
 
-    # Try making post request to Facebook, excpet return
+    res_json = None
+
+    if os.path.exists(cache_path):
+        try:
+            with open(cache_path, "r", encoding="utf-8") as f:
+                res_json = json.load(f)
+                # Purge cache if it contains rate limit errors or is completely empty
+                if res_json.get("errors") or not safe_get(res_json, "data", "viewer", "marketplace_product_details_page", "target"):
+                    res_json = None
+                    try: os.remove(cache_path)
+                    except: pass
+        except Exception:
+            res_json = None
+
+    if not res_json:
+        base_variables = {
+            "enableJobEmployerActionBar": False,
+            "enableJobSeekerActionBar": False,
+            "feedbackSource": 56,
+            "feedLocation": "MARKETPLACE_MEGAMALL",
+            "referralCode": "null",
+            "referralSurfaceString": "search",
+            "scale": 1,
+            "targetId": str(listingID),
+            "useDefaultActor": False,
+            "__relay_internal__pv__ShouldUpdateMarketplaceBoostListingBoostedStatusrelayprovider": False,
+            "__relay_internal__pv__CometUFISingleLineUFIrelayprovider": False,
+            "__relay_internal__pv__CometUFIShareActionMigrationrelayprovider": True,
+            "__relay_internal__pv__CometUFIReactionsEnableShortNamerelayprovider": False,
+            "__relay_internal__pv__CometUFICommentAutoTranslationTyperelayprovider": "ORIGINAL",
+            "__relay_internal__pv__CometUFICommentAvatarStickerAnimatedImagerelayprovider": False,
+            "__relay_internal__pv__CometUFICommentActionLinksRewriteEnabledrelayprovider": False,
+            "__relay_internal__pv__IsWorkUserrelayprovider": False,
+            "__relay_internal__pv__GHLShouldChangeSponsoredDataFieldNamerelayprovider": False,
+            "__relay_internal__pv__GHLShouldChangeAdIdFieldNamerelayprovider": False,
+            "__relay_internal__pv__CometUFI_dedicated_comment_routable_dialog_gkrelayprovider": True
+        }
+
+        payload = {
+            "doc_id": "26924013917190310",
+            "variables": json.dumps(base_variables)
+        }
+
+        status, error, facebookResponse = getFacebookResponse(payload)
+        
+        if status != "Success":
+            return ("Failure", {"source": "Facebook", "message": error.get('message', 'Unknown Error')}, {})
+
+        try:
+            res_json = json.loads(facebookResponse.text)
+            
+            # Validate payload BEFORE caching to prevent saving Rate Limit data
+            target = safe_get(res_json, "data", "viewer", "marketplace_product_details_page", "target")
+            if target is not None:
+                with open(cache_path, "w", encoding="utf-8") as f:
+                    json.dump(res_json, f, indent=2, ensure_ascii=False)
+            else:
+                return ("Failure", {"source": "Facebook", "message": "Rate limited or item unavailable."}, {})
+        except Exception as e:
+            return ("Failure", {"source": "Parsing", "message": f"Parsing error: {str(e)}"}, {})
+
     try:
-        facebookResponse = requests.post(
-            GRAPHQL_URL, headers=GRAPHQL_HEADERS, data=requestPayload)
-    except requests.exceptions.RequestException as requestError:
-        status = "Failure"
-        error["source"] = "Request"
-        error["message"] = str(requestError)
-        facebookResponse = None
-        return (status, error, facebookResponse)
+        if not res_json.get("data"):
+            return ("Failure", {"source": "Facebook", "message": "Returned null data."}, {})
 
-    if (facebookResponse.status_code == 200):
-        facebookResponseJSON = json.loads(facebookResponse.text)
+        target = safe_get(res_json, "data", "viewer", "marketplace_product_details_page", "target")
+        
+        if not target:
+            return ("Failure", {"source": "Parsing", "message": "Could not locate 'target' node in JSON."}, {})
 
-        if (facebookResponseJSON.get("errors")):
-            status = "Failure"
-            error["source"] = "Facebook"
-            error["message"] = facebookResponseJSON["errors"][0]["message"]
-    else:
-        status = "Failure"
-        error["source"] = "Facebook"
-        error["message"] = "Status code {}".format(
-            facebookResponse.status_code)
+        desc_text = safe_get(target, "redacted_description", "text")
+        data["description"] = desc_text.replace('\\n', '\n').strip() if desc_text else "No description provided."
+        data["title"] = target.get("marketplace_listing_title")
+        data["creation_time"] = target.get("creation_time")
+        data["location_text"] = safe_get(target, "location_text", "text")
+        data["is_live"] = target.get("is_live")
+        data["is_pending"] = target.get("is_pending")
+        data["is_sold"] = target.get("is_sold")
+        data["delivery_types"] = target.get("delivery_types", [])
+        data["share_uri"] = target.get("share_uri")
+        data["category"] = safe_get(target, "marketplaceListingRenderableIfLoggedOut", "marketplace_listing_category_name")
+        raw_attributes = target.get("attribute_data", [])
+        data["attributes"] = {
+            attr.get("attribute_name", "Unknown"): attr.get("label", attr.get("value"))
+            for attr in raw_attributes
+        }
 
-    return (status, error, facebookResponse)
+        return ("Success", {}, data)
+            
+    except Exception as e:
+        return ("Failure", {"source": "Parsing", "message": f"Parsing error: {str(e)}"}, {})
 
+def getListingImages(listingID):
+    cache_dir = "cache"
+    os.makedirs(cache_dir, exist_ok=True)
+    cache_path = os.path.join(cache_dir, f"images_{listingID}.json")
 
-# Helper function
+    res_json = None
+
+    if os.path.exists(cache_path):
+        try:
+            with open(cache_path, "r", encoding="utf-8") as f:
+                res_json = json.load(f)
+                if res_json.get("errors") or safe_get(res_json, "data", "viewer", "marketplace_product_details_page", "target", "listing_photos") is None:
+                    res_json = None
+                    try: os.remove(cache_path)
+                    except: pass
+        except Exception:
+            res_json = None
+
+    if not res_json:
+        payload = {
+            "doc_id": "10059604367394414",
+            "variables": json.dumps({"targetId": str(listingID)})
+        }
+        
+        status, error, facebookResponse = getFacebookResponse(payload)
+        
+        if status != "Success":
+            return ("Failure", error, [])
+        
+        try:
+            res_json = json.loads(facebookResponse.text)
+            
+            # Validate payload BEFORE caching
+            photos = safe_get(res_json, "data", "viewer", "marketplace_product_details_page", "target", "listing_photos")
+            if photos is not None:
+                with open(cache_path, "w", encoding="utf-8") as f:
+                    json.dump(res_json, f, indent=2, ensure_ascii=False)
+            else:
+                return ("Failure", {"source": "Facebook", "message": "Rate limited or item unavailable."}, [])
+        except Exception as e:
+            return ("Failure", {"source": "Parsing", "message": str(e)}, [])
+            
+    try:
+        photos = safe_get(res_json, "data", "viewer", "marketplace_product_details_page", "target", "listing_photos", default=[])
+        image_urls = [safe_get(photo, "image", "uri") for photo in photos if safe_get(photo, "image", "uri")]
+        return ("Success", {}, image_urls)
+    except Exception as e:
+        return ("Failure", {"source": "Parsing", "message": str(e)}, [])
+
+def getFacebookResponse(requestPayload):
+    try:
+        facebookResponse = SCRAPER_SESSION.post(
+            GRAPHQL_URL, 
+            headers=GRAPHQL_HEADERS, 
+            data=requestPayload, 
+            timeout=20
+        )
+
+        try:
+            res_json = facebookResponse.json()
+            if res_json.get("errors"):
+                error_msg = res_json["errors"][0].get("message", "Unknown API Error")
+                return ("Failure", {"source": "Facebook", "message": error_msg}, facebookResponse)
+        except:
+            pass
+
+        return ("Success", {}, facebookResponse)
+    except Exception as e:
+        return ("Failure", {"source": "Request", "message": str(e)}, None)
+
 def parsePageResults(rawPageResults):
     listingPages = []
 
-    pageIndex = 0
     for rawPageResult in rawPageResults:
+        pageListings = []
+        edges = safe_get(rawPageResult, "data", "marketplace_search", "feed_units", "edges", default=[])
 
-        # Create a new listings object within the listingPages array
-        listingPages.append({"listings": []})
+        for listing in edges:
+            node = listing.get("node", {})
 
-        for listing in rawPageResult["data"]["marketplace_search"]["feed_units"]["edges"]:
+            if node.get("__typename") != "MarketplaceFeedListingStoryObject":
+                continue
 
-            # If object is a listing
-            if (listing["node"]["__typename"] == "MarketplaceFeedListingStoryObject"):
-                listingID = listing["node"]["listing"]["id"]
-                listingName = listing["node"]["listing"]["marketplace_listing_title"]
-                listingCurrentPrice = listing["node"]["listing"]["listing_price"]["formatted_amount"]
+            listing_data = node.get("listing")
+            if not listing_data:
+                continue
 
-                # If listing has a previous price
-                if (listing["node"]["listing"]["strikethrough_price"]):
-                    listingPreviousPrice = listing["node"]["listing"]["strikethrough_price"]["formatted_amount"]
-                else:
-                    listingPreviousPrice = ""
-
-                listingSaleIsPending = listing["node"]["listing"]["is_pending"]
-                listingPrimaryPhotoURL = listing["node"]["listing"]["primary_listing_photo"]["image"]["uri"]
-                sellerName = listing["node"]["listing"]["marketplace_listing_seller"]["name"]
-                sellerLocation = listing["node"]["listing"]["location"]["reverse_geocode"]["city_page"]["display_name"]
-                sellerType = listing["node"]["listing"]["marketplace_listing_seller"]["__typename"]
-
-                # Add the listing to its corresponding page
-                listingPages[pageIndex]["listings"].append({
-                    "id": listingID,
-                    "name": listingName,
-                    "currentPrice": listingCurrentPrice,
-                    "previousPrice": listingPreviousPrice,
-                    "saleIsPending": str(listingSaleIsPending).lower(),
-                    "primaryPhotoURL": listingPrimaryPhotoURL,
-                    "sellerName": sellerName,
-                    "sellerLocation": sellerLocation,
-                    "sellerType": sellerType
+            try:
+                pageListings.append({
+                    "id": listing_data.get("id"),
+                    "name": listing_data.get("marketplace_listing_title"),
+                    "currentPrice": safe_get(listing_data, "listing_price", "formatted_amount"),
+                    "previousPrice": safe_get(listing_data, "strikethrough_price", "formatted_amount", default=""),
+                    "saleIsPending": str(listing_data.get("is_pending", False)).lower(),
+                    "primaryPhotoURL": safe_get(listing_data, "primary_listing_photo", "image", "uri"),
+                    "sellerName": safe_get(listing_data, "marketplace_listing_seller", "name", default="Unknown"),
+                    "sellerLocation": safe_get(listing_data, "location", "reverse_geocode", "city_page", "display_name", default=""),
+                    "sellerType": safe_get(listing_data, "marketplace_listing_seller", "__typename", default="")
                 })
 
-        pageIndex += 1
+            except Exception:
+                continue
+
+        listingPages.append({"listings": pageListings})
 
     return listingPages

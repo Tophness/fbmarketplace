@@ -8,7 +8,6 @@ API = Flask(__name__)
 def locations():
     response = {}
 
-    # Required parameters provided by the user
     locationQuery = request.args.get("locationQuery")
 
     if (locationQuery):
@@ -16,6 +15,7 @@ def locations():
             locationQuery=locationQuery)
     else:
         status = "Failure"
+        error = {}
         error["source"] = "User"
         error["message"] = "Missing required parameter"
         data = {}
@@ -31,16 +31,31 @@ def locations():
 def search():
     response = {}
 
-    # Required parameters provided by user
     locationLatitude = request.args.get("locationLatitude")
     locationLongitude = request.args.get("locationLongitude")
     listingQuery = request.args.get("listingQuery")
+    minPrice = request.args.get("minPrice")
+    maxPrice = request.args.get("maxPrice")
+    cursor = request.args.get("cursor")
+    
+    try:
+        numPageResults = int(request.args.get("numPageResults", 1))
+    except ValueError:
+        numPageResults = 1
 
     if (locationLatitude and locationLongitude and listingQuery):
         status, error, data = MarketplaceScraper.getListings(
-            locationLatitude=locationLatitude, locationLongitude=locationLongitude, listingQuery=listingQuery)
+            locationLatitude=locationLatitude, 
+            locationLongitude=locationLongitude, 
+            listingQuery=listingQuery,
+            numPageResults=numPageResults,
+            minPrice=minPrice,
+            maxPrice=maxPrice,
+            cursor=cursor
+        )
     else:
         status = "Failure"
+        error = {}
         error["source"] = "User"
         error["message"] = "Missing required parameter(s)"
         data = {}
@@ -50,3 +65,6 @@ def search():
     response["data"] = data
 
     return response
+
+if __name__ == "__main__":
+    API.run(debug=True)
