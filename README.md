@@ -12,6 +12,7 @@ A powerful, dual-purpose project featuring an easy-to-use Facebook Marketplace A
 
 ## Screenshots
 <img width="1302" height="1748" alt="image" src="https://github.com/user-attachments/assets/ecd1d414-ab46-415a-8e28-9da4a77e6421" />
+<img width="402" height="419" alt="image" src="https://github.com/user-attachments/assets/8d4e1825-aa46-4232-89c9-3b664ba3d0d8" />
 <img width="1302" height="1748" alt="image" src="https://github.com/user-attachments/assets/6eceebcc-e686-4d48-89e7-e79835fd3261" />
 <img width="3840" height="2110" alt="image" src="https://github.com/user-attachments/assets/6c76149e-d33b-4701-bc9d-dacce1fe0845" />
 
