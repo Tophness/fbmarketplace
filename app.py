@@ -393,6 +393,8 @@ class ListingItemWidget(QWidget):
     
     def __init__(self, title, price, is_fav=False):
         super().__init__()
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        
         layout = QVBoxLayout(self)
         layout.setContentsMargins(5, 5, 5, 5)
         
@@ -415,8 +417,21 @@ class ListingItemWidget(QWidget):
         self.thumb_lbl.setAlignment(Qt.AlignCenter)
         self.thumb_lbl.setStyleSheet("background-color: #eee; border: 1px solid #ccc;")
         
+        self.bg_status_lbl = QLabel("⏳ Fetching background data...")
+        self.bg_status_lbl.setStyleSheet("color: #0055a4; font-weight: bold; font-size: 11px;")
+        self.bg_status_lbl.setVisible(False)
+        
         layout.addLayout(top_layout)
         layout.addWidget(self.thumb_lbl)
+        layout.addWidget(self.bg_status_lbl)
+        
+    def set_fetching_state(self, is_fetching):
+        if is_fetching:
+            self.setStyleSheet("ListingItemWidget { background-color: rgba(173, 216, 230, 80); border: 1px solid #73A9C2; border-radius: 5px; }")
+            self.bg_status_lbl.setVisible(True)
+        else:
+            self.setStyleSheet("")
+            self.bg_status_lbl.setVisible(False)
         
     def toggle_fav(self):
         checked = self.fav_btn.isChecked()
@@ -435,6 +450,64 @@ class CustomListWidgetItem(QListWidgetItem):
         
     def __lt__(self, other):
         return self.main_app.compare_items(self, other)
+
+
+class MarketplaceListWidget(QListWidget):
+    """
+    A custom QListWidget that saves the physical neighbors of an item when it is selected.
+    If the selected item resorts and moves to a completely different part of the list, 
+    pressing 'Down' will gracefully step to the item that was physically next in sequence originally.
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.saved_prev_item = None
+        self.saved_next_item = None
+        self.itemSelectionChanged.connect(self.save_neighbors)
+
+    def save_neighbors(self):
+        curr = self.currentItem()
+        if not curr:
+            self.saved_prev_item = None
+            self.saved_next_item = None
+            return
+        
+        row = self.row(curr)
+        
+        # Save previous valid list item
+        p_row = row - 1
+        p_item = None
+        while p_row >= 0:
+            itm = self.item(p_row)
+            if itm and not itm.isHidden() and not itm.data(Qt.UserRole).get("is_divider"):
+                p_item = itm
+                break
+            p_row -= 1
+            
+        # Save next valid list item
+        n_row = row + 1
+        n_item = None
+        while n_row < self.count():
+            itm = self.item(n_row)
+            if itm and not itm.isHidden() and not itm.data(Qt.UserRole).get("is_divider"):
+                n_item = itm
+                break
+            n_row += 1
+            
+        self.saved_prev_item = p_item
+        self.saved_next_item = n_item
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Down:
+            if self.saved_next_item and not self.saved_next_item.isHidden():
+                self.setCurrentItem(self.saved_next_item)
+                self.scrollToItem(self.saved_next_item)
+                return
+        elif event.key() == Qt.Key_Up:
+            if self.saved_prev_item and not self.saved_prev_item.isHidden():
+                self.setCurrentItem(self.saved_prev_item)
+                self.scrollToItem(self.saved_prev_item)
+                return
+        super().keyPressEvent(event)
 
 
 class SearchWorker(QThread):
@@ -514,6 +587,7 @@ class ThumbnailWorker(QThread):
 
 class BackgroundWorker(QThread):
     details_fetched = pyqtSignal(str, dict)
+    fetching_started = pyqtSignal(str)
     
     def __init__(self, fetch_desc=False, fetch_images=False, delay=2.0):
         super().__init__()
@@ -543,19 +617,29 @@ class BackgroundWorker(QThread):
                 self.clear_queue()
                 continue
                 
+            self.fetching_started.emit(item_id)
+                
             data = {}
             if self.fetch_desc:
                 status, error, desc_data = MarketplaceScraper.getListingDetails(item_id)
                 if status == "Success":
                     data.update(desc_data)
+                    data["desc_error"] = False
                 else:
                     data["description"] = f"Error: {error.get('message')}"
+                    data["desc_error"] = True
             
             if self.fetch_images:
                 img_status, img_error, img_urls = MarketplaceScraper.getListingImages(item_id)
-                data["image_urls"] = img_urls if img_status == "Success" else []
+                if img_status == "Success":
+                    data["image_urls"] = img_urls
+                    data["img_error"] = False
+                else:
+                    data["image_urls"] = None
+                    data["img_error"] = True
             else:
                 data["image_urls"] = None
+                data["img_error"] = False
                 
             self.details_fetched.emit(item_id, data)
             time.sleep(self.delay)
@@ -566,6 +650,7 @@ class BackgroundWorker(QThread):
 
 class OnDemandWorker(QThread):
     details_fetched = pyqtSignal(str, dict)
+    fetching_started = pyqtSignal(str)
     
     def __init__(self, item_id, fetch_desc, fetch_images):
         super().__init__()
@@ -574,17 +659,25 @@ class OnDemandWorker(QThread):
         self.fetch_images = fetch_images
         
     def run(self):
+        self.fetching_started.emit(self.item_id)
         data = {}
         if self.fetch_desc:
             status, error, desc_data = MarketplaceScraper.getListingDetails(self.item_id)
             if status == "Success":
                 data.update(desc_data)
+                data["desc_error"] = False
             else:
                 data["description"] = f"Error: {error.get('message')}"
+                data["desc_error"] = True
                 
         if self.fetch_images:
             img_status, img_error, img_urls = MarketplaceScraper.getListingImages(self.item_id)
-            data["image_urls"] = img_urls if img_status == "Success" else []
+            if img_status == "Success":
+                data["image_urls"] = img_urls
+                data["img_error"] = False
+            else:
+                data["image_urls"] = None
+                data["img_error"] = True
             
         self.details_fetched.emit(self.item_id, data)
 
@@ -659,8 +752,13 @@ class MarketplaceApp(QMainWindow):
             fetch_images=self.settings.get("bg_images", False),
             delay=self.settings.get("bg_rate_limit", 2.0)
         )
+        self.bg_worker.fetching_started.connect(self.on_fetching_started)
         self.bg_worker.details_fetched.connect(self.on_background_fetched)
         self.bg_worker.start()
+
+        self.queue_timer = QTimer(self)
+        self.queue_timer.timeout.connect(self.update_queue_status)
+        self.queue_timer.start(1000)
         
         self.load_favorites()
         self.init_ui()
@@ -940,16 +1038,23 @@ class MarketplaceApp(QMainWindow):
         config_layout.addWidget(self.sort_box)
 
         self.status_lbl = QLabel("Ready")
+        
+        self.bg_queue_lbl = QLabel("")
+        self.bg_queue_lbl.setVisible(False)
+        self.bg_queue_lbl.setStyleSheet("color: #666; font-style: italic;")
+        
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
         self.progress_bar.setRange(0, 0)
         
         status_layout = QHBoxLayout()
         status_layout.addWidget(self.status_lbl)
+        status_layout.addWidget(self.bg_queue_lbl)
+        status_layout.addStretch()
         status_layout.addWidget(self.progress_bar)
         
         self.splitter = QSplitter(Qt.Horizontal)
-        self.list_widget = QListWidget()
+        self.list_widget = MarketplaceListWidget()
         self.list_widget.setMinimumWidth(380)
         self.list_widget.setSpacing(5)
         self.list_widget.verticalScrollBar().valueChanged.connect(self.on_scroll)
@@ -1035,6 +1140,15 @@ class MarketplaceApp(QMainWindow):
         else:
             super().keyPressEvent(event)
             
+    def update_queue_status(self):
+        if hasattr(self, 'bg_worker') and self.bg_worker and self.bg_worker.isRunning():
+            qsize = self.bg_worker.queue.qsize()
+            if qsize > 0:
+                self.bg_queue_lbl.setText(f"| Background Queue: {qsize} items")
+                self.bg_queue_lbl.setVisible(True)
+            else:
+                self.bg_queue_lbl.setVisible(False)
+
     def remove_worker(self, worker, worker_list):
         if worker in worker_list:
             worker_list.remove(worker)
@@ -1485,7 +1599,22 @@ class MarketplaceApp(QMainWindow):
                         widget.set_thumbnail(pixmap)
                     break
             
+    def on_fetching_started(self, item_id):
+        self.set_item_fetching_state(item_id, True)
+        
+    def set_item_fetching_state(self, item_id, is_fetching):
+        for i in range(self.list_widget.count()):
+            list_item = self.list_widget.item(i)
+            data = list_item.data(Qt.UserRole)
+            if data and not data.get("is_divider") and data.get("id") == item_id:
+                widget = self.list_widget.itemWidget(list_item)
+                if hasattr(widget, 'set_fetching_state'):
+                    widget.set_fetching_state(is_fetching)
+                break
+
     def on_background_fetched(self, item_id, details):
+        self.set_item_fetching_state(item_id, False)
+        
         if item_id not in self.listing_details:
             self.listing_details[item_id] = details
         else:
@@ -1506,6 +1635,8 @@ class MarketplaceApp(QMainWindow):
                 self.setup_images_for_item(data)
             
     def on_demand_fetched(self, item_id, details):
+        self.set_item_fetching_state(item_id, False)
+        
         if item_id not in self.listing_details:
             self.listing_details[item_id] = details
         else:
@@ -1621,17 +1752,33 @@ class MarketplaceApp(QMainWindow):
         item_id = item_data["id"]
         
         details = self.listing_details.get(item_id, {})
+        
+        has_desc_error = details.get("desc_error", False)
+        desc_text = details.get("description", "")
+        if isinstance(desc_text, str) and desc_text.startswith("Error:"):
+            has_desc_error = True
+            
+        has_img_error = details.get("img_error", False)
+        
         needs_desc = not details.get("description") and "description" not in details
-        needs_imgs = details.get("image_urls") is None
+        needs_desc = needs_desc or has_desc_error
+        
+        needs_imgs = details.get("image_urls") is None or has_img_error
         
         self.update_right_panel(item_data)
         
         if needs_desc or needs_imgs:
-            self.metadata_lbl.setText(self.metadata_lbl.text() + "<br><i>Loading additional details...</i>")
-            if needs_desc:
-                self.desc_text.setPlainText("Loading details on demand...")
+            if has_desc_error or has_img_error:
+                self.metadata_lbl.setText(self.metadata_lbl.text() + "<br><i>Retrying failed details on demand...</i>")
+                if needs_desc:
+                    self.desc_text.setPlainText("Previous fetch failed. Retrying on demand...")
+            else:
+                self.metadata_lbl.setText(self.metadata_lbl.text() + "<br><i>Loading additional details...</i>")
+                if needs_desc:
+                    self.desc_text.setPlainText("Loading details on demand...")
                 
             worker = OnDemandWorker(item_id, fetch_desc=needs_desc, fetch_images=needs_imgs)
+            worker.fetching_started.connect(self.on_fetching_started)
             worker.details_fetched.connect(self.on_demand_fetched)
             worker.finished.connect(lambda w=worker: self.remove_worker(w, self.ondemand_workers))
             self.ondemand_workers.append(worker)
@@ -1712,7 +1859,7 @@ class MarketplaceApp(QMainWindow):
         
         details = self.listing_details.get(item_data["id"])
         
-        if details and ("description" in details):
+        if details and ("description" in details) and not details.get("desc_error"):
             status_list = []
             if details.get("is_live"): status_list.append("Live")
             if details.get("is_pending"): status_list.append("Pending")
@@ -1734,7 +1881,11 @@ class MarketplaceApp(QMainWindow):
             meta_html += f"<b>Delivery:</b> {del_str}<br><b>Listed:</b> {created_str}<br><b>Link:</b> {link_str}"
             self.desc_text.setPlainText(details.get("description", "No description provided."))
         else:
-            self.desc_text.setPlainText("")
+            if details and details.get("desc_error"):
+                meta_html += "<br><b>Status:</b> Detail fetch failed."
+                self.desc_text.setPlainText(details.get("description", "Error fetching details."))
+            else:
+                self.desc_text.setPlainText("")
             
         self.metadata_lbl.setText(meta_html)
 
